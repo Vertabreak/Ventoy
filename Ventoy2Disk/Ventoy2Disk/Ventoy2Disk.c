@@ -153,6 +153,8 @@ static BOOL IsVentoyPhyDrive(int PhyDrive, UINT64 SizeBytes, MBR_HEAD *pMBR, UIN
 		}
 
 		*Part2StartSector = pGpt->PartTbl[1].StartLBA;
+
+        memcpy(pMBR, &(pGpt->MBR), sizeof(MBR_HEAD));
 	}
 	else
 	{
@@ -188,9 +190,10 @@ static BOOL IsVentoyPhyDrive(int PhyDrive, UINT64 SizeBytes, MBR_HEAD *pMBR, UIN
 		}
 
 		*Part2StartSector = MBR.PartTbl[1].StartSectorId;
+
+        memcpy(pMBR, &MBR, sizeof(MBR_HEAD));
 	}
 
-	memcpy(pMBR, &MBR, sizeof(MBR_HEAD));
     Log("PhysicalDrive%d is ventoy disk", PhyDrive);
     return TRUE;
 }
@@ -231,13 +234,6 @@ static int FilterPhysicalDrive(PHY_DRIVE_INFO *pDriveList, DWORD DriveCount)
         CurDrive->Id = -1;
         memset(CurDrive->DriveLetters, 0, sizeof(CurDrive->DriveLetters));
 
-        // Too big for MBR
-        if (CurDrive->SizeInBytes > 2199023255552ULL)
-        {
-            Log("<%s %s> is filtered for too big for MBR.", CurDrive->VendorId, CurDrive->ProductId);
-            continue;
-        }
-
         if (g_FilterRemovable && (!CurDrive->RemovableMedia))
         {
             Log("<%s %s> is filtered for not removable.", CurDrive->VendorId, CurDrive->ProductId);
@@ -266,8 +262,10 @@ static int FilterPhysicalDrive(PHY_DRIVE_INFO *pDriveList, DWORD DriveCount)
 
 		if (IsVentoyPhyDrive(CurDrive->PhyDrive, CurDrive->SizeInBytes, &MBR, &Part2StartSector))
         {
+            memcpy(&(CurDrive->MBR), &MBR, sizeof(MBR));
             CurDrive->PartStyle = (MBR.PartTbl[0].FsFlag == 0xEE) ? 1 : 0;
-			GetVentoyVerInPhyDrive(CurDrive, Part2StartSector, CurDrive->VentoyVersion, sizeof(CurDrive->VentoyVersion));
+            GetVentoyVerInPhyDrive(CurDrive, Part2StartSector, CurDrive->VentoyVersion, sizeof(CurDrive->VentoyVersion), &(CurDrive->SecureBootSupport));
+            Log("PhyDrive %d is Ventoy Disk ver:%s SecureBoot:%u", CurDrive->PhyDrive, CurDrive->VentoyVersion, CurDrive->SecureBootSupport);
         }
     }
 

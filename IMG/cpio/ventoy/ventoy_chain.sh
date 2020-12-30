@@ -305,6 +305,14 @@ ventoy_get_os_type() {
         echo 'blackPanther'; return
     fi
     
+    if $GREP -q 'primeos' /proc/version; then
+        echo 'primeos'; return
+    fi
+    
+    if $GREP -q 'austrumi' /proc/version; then
+        echo 'austrumi'; return
+    fi
+    
     echo "default"
 }
 

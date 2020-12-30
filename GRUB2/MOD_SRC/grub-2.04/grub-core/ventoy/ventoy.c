@@ -41,8 +41,8 @@
 #include <grub/time.h>
 #include <grub/video.h>
 #include <grub/acpi.h>
-#include <grub/relocator.h>
 #include <grub/charset.h>
+#include <grub/crypto.h>
 #include <grub/ventoy.h>
 #include "ventoy_def.h"
 
@@ -60,6 +60,7 @@ int g_sort_case_sensitive = 0;
 int g_tree_view_menu_style = 0;
 static grub_file_t g_old_file;
 static int g_ventoy_last_entry_back;
+static grub_uint32_t g_ventoy_plat_data;
 
 char g_iso_path[256];
 char g_img_swap_tmp_buf[1024];
@@ -97,6 +98,7 @@ char *g_wimiso_path = NULL;
 int g_vhdboot_enable = 0;
 
 grub_uint64_t g_conf_replace_offset = 0;
+grub_uint64_t g_svd_replace_offset = 0;
 conf_replace *g_conf_replace_node = NULL;
 grub_uint8_t *g_conf_replace_new_buf = NULL;
 int g_conf_replace_new_len = 0;
@@ -446,8 +448,8 @@ static grub_err_t ventoy_cmd_break(grub_extcmd_context_t ctxt, int argc, char **
         grub_printf("    03/13: hook / (+cat log)\r\n");
         grub_printf("\r\n");
         grub_printf(" debug:\r\n");
-        grub_printf("    0: debug is on\r\n");
-        grub_printf("    1: debug is off\r\n");
+        grub_printf("    0: debug is off\r\n");
+        grub_printf("    1: debug is on\r\n");
         grub_printf("\r\n");
         VENTOY_CMD_RETURN(GRUB_ERR_NONE);
     }
@@ -973,7 +975,7 @@ static grub_err_t ventoy_cmd_check_compatible(grub_extcmd_context_t ctxt, int ar
 
     for (i = 0; i < (int)ARRAY_SIZE(files); i++)
     {
-        grub_snprintf(buf, sizeof(buf) - 1, "[ -e %s/%s ]", args[0], files[i]);
+        grub_snprintf(buf, sizeof(buf) - 1, "[ -e \"%s/%s\" ]", args[0], files[i]);
         if (0 == grub_script_execute_sourcecode(buf))
         {
             debug("file %s exist, ventoy_compatible YES\n", buf);
@@ -1351,6 +1353,32 @@ static int ventoy_colect_img_files(const char *filename, const struct grub_dirho
     return 0;
 }
 
+static int ventoy_arch_mode_init(void)
+{
+    #ifdef GRUB_MACHINE_EFI
+    if (grub_strcmp(GRUB_TARGET_CPU, "i386") == 0)
+    {
+        g_ventoy_plat_data = VTOY_PLAT_I386_UEFI;
+        grub_snprintf(g_arch_mode_suffix, sizeof(g_arch_mode_suffix), "%s", "ia32");
+    }
+    else if (grub_strcmp(GRUB_TARGET_CPU, "arm64") == 0)
+    {
+        g_ventoy_plat_data = VTOY_PLAT_ARM64_UEFI;
+        grub_snprintf(g_arch_mode_suffix, sizeof(g_arch_mode_suffix), "%s", "aa64");
+    }
+    else
+    {
+        g_ventoy_plat_data = VTOY_PLAT_X86_64_UEFI;
+        grub_snprintf(g_arch_mode_suffix, sizeof(g_arch_mode_suffix), "%s", "uefi");
+    }
+#else
+    g_ventoy_plat_data = VTOY_PLAT_X86_LEGACY;
+    grub_snprintf(g_arch_mode_suffix, sizeof(g_arch_mode_suffix), "%s", "legacy");
+#endif
+
+    return 0;
+}
+
 int ventoy_fill_data(grub_uint32_t buflen, char *buffer)
 {
     int len = GRUB_UINT_MAX;
@@ -1402,11 +1430,7 @@ int ventoy_fill_data(grub_uint32_t buflen, char *buffer)
 
     grub_memcpy(guidstr, &guid, sizeof(guid));
 
-    #if defined (GRUB_MACHINE_EFI)
-    puint2[0] = grub_swap_bytes32(0x55454649);
-    #else
-    puint2[0] = grub_swap_bytes32(0x42494f53);
-    #endif
+    puint2[0] = grub_swap_bytes32(g_ventoy_plat_data);    
 
     /* Easter egg :) It will be appreciated if you reserve it, but NOT mandatory. */
     #pragma GCC diagnostic push
@@ -1425,6 +1449,55 @@ int ventoy_fill_data(grub_uint32_t buflen, char *buffer)
     ventoy_set_env(name, guidstr);
 
     return len;
+}
+
+int ventoy_check_password(const vtoy_password *pwd, int retry)
+{
+    int offset;
+    char input[256];
+    grub_uint8_t md5[16];
+
+    while (retry--)
+    {
+        grub_memset(input, 0, sizeof(input));
+
+        grub_printf("Enter password: ");
+        grub_refresh();
+        
+        if (pwd->type == VTOY_PASSWORD_TXT)
+        {
+            grub_password_get(input, 128);
+            if (grub_strcmp(pwd->text, input) == 0)
+            {
+                return 0;
+            }
+        }
+        else if (pwd->type == VTOY_PASSWORD_MD5)
+        {
+            grub_password_get(input, 128);
+            grub_crypto_hash(GRUB_MD_MD5, md5, input, grub_strlen(input));
+            if (grub_memcmp(pwd->md5, md5, 16) == 0)
+            {
+                return 0;
+            }
+        }
+        else if (pwd->type == VTOY_PASSWORD_SALT_MD5)
+        {
+            offset = (int)grub_snprintf(input, 128, "%s", pwd->salt);
+            grub_password_get(input + offset, 128);
+            
+            grub_crypto_hash(GRUB_MD_MD5, md5, input, grub_strlen(input));
+            if (grub_memcmp(pwd->md5, md5, 16) == 0)
+            {
+                return 0;
+            }
+        }
+        
+        grub_printf("Invalid password!\n\n");
+        grub_refresh();
+    }
+
+    return 1;
 }
 
 static img_info * ventoy_get_min_iso(img_iterator_node *node)
@@ -1636,6 +1709,7 @@ int ventoy_check_device_result(int ret)
 
 int ventoy_check_device(grub_device_t dev)
 {
+    int workaround = 0;
     grub_file_t file;
     grub_uint64_t offset;
     char devname[64];
@@ -1651,13 +1725,31 @@ int ventoy_check_device(grub_device_t dev)
 
     if (0 == ventoy_check_file_exist("(%s,2)/ventoy/ventoy.cpio", dev->disk->name) ||
         0 == ventoy_check_file_exist("(%s,2)/grub/localboot.cfg", dev->disk->name) ||
-        0 == ventoy_check_file_exist("(%s,2)/tool/mount.exfat-fuse_64", dev->disk->name))
+        0 == ventoy_check_file_exist("(%s,2)/tool/mount.exfat-fuse_aarch64", dev->disk->name))
     {
-        return ventoy_check_device_result(2 | 0x1000);
+        #ifndef GRUB_MACHINE_EFI
+        if (0 == ventoy_check_file_exist("(ventoydisk)/ventoy/ventoy.cpio", dev->disk->name) ||
+            0 == ventoy_check_file_exist("(ventoydisk)/grub/localboot.cfg", dev->disk->name) ||
+            0 == ventoy_check_file_exist("(ventoydisk)/tool/mount.exfat-fuse_aarch64", dev->disk->name))
+        {
+            return ventoy_check_device_result(2 | 0x1000);
+        }
+        else
+        {
+            workaround = 1;
+        }
+        #endif
     }
 
     /* We must have partition 2 */
-    file = ventoy_grub_file_open(VENTOY_FILE_TYPE, "(%s,2)/ventoy/ventoy.cpio", dev->disk->name);
+    if (workaround)
+    {
+        file = ventoy_grub_file_open(VENTOY_FILE_TYPE, "%s", "(ventoydisk)/ventoy/ventoy.cpio");
+    }
+    else
+    {
+        file = ventoy_grub_file_open(VENTOY_FILE_TYPE, "(%s,2)/ventoy/ventoy.cpio", dev->disk->name);        
+    }
     if (!file)
     {
         return ventoy_check_device_result(3 | 0x1000);
@@ -1675,37 +1767,55 @@ int ventoy_check_device(grub_device_t dev)
         return ventoy_check_device_result(5);
     }
 
-    offset = partition->start + partition->len;
-    partition = file->device->disk->partition;
-    if ((partition->number != 1) || (partition->len != 65536) || (offset != partition->start))
+    if (workaround)
     {
-        grub_file_close(file);
-        return ventoy_check_device_result(6);
+        ventoy_part_table *PartTbl = g_ventoy_part_info->MBR.PartTbl;
+        if (PartTbl[1].StartSectorId != PartTbl[0].StartSectorId + PartTbl[0].SectorCount ||
+            PartTbl[1].SectorCount != 65536)
+        {
+            grub_file_close(file);
+            return ventoy_check_device_result(6);
+        }
     }
+    else
+    {
+        offset = partition->start + partition->len;
+        partition = file->device->disk->partition;
+        if ((partition->number != 1) || (partition->len != 65536) || (offset != partition->start))
+        {
+            grub_file_close(file);
+            return ventoy_check_device_result(7);
+        }
+    }
+
     grub_file_close(file);
 
-    grub_snprintf(devname, sizeof(devname), "%s,2", dev->disk->name);
-    dev2 = grub_device_open(devname);
-    if (!dev2)
+    if (workaround == 0)
     {
-        return ventoy_check_device_result(7);
-    }
+        grub_snprintf(devname, sizeof(devname), "%s,2", dev->disk->name);
+        dev2 = grub_device_open(devname);
+        if (!dev2)
+        {
+            return ventoy_check_device_result(8);
+        }
 
-    fs = grub_fs_probe(dev2);
-    if (!fs)
-    {
-        grub_device_close(dev2);
-        return ventoy_check_device_result(8);
-    }
+        fs = grub_fs_probe(dev2);
+        if (!fs)
+        {
+            grub_device_close(dev2);
+            return ventoy_check_device_result(9);
+        }
 
-    fs->fs_label(dev2, &label);
-    if ((!label) || grub_strncmp("VTOYEFI", label, 7))
-    {
-        grub_device_close(dev2);
-        return ventoy_check_device_result(9);
-    }
+        fs->fs_label(dev2, &label);
+        if ((!label) || grub_strncmp("VTOYEFI", label, 7))
+        {
+            grub_device_close(dev2);
+            return ventoy_check_device_result(10);
+        }
 
-    grub_device_close(dev2);    
+        grub_device_close(dev2);    
+    }
+    
     return ventoy_check_device_result(0);
 }
 
@@ -2056,6 +2166,8 @@ static grub_err_t ventoy_cmd_chosen_img_path(grub_extcmd_context_t ctxt, int arg
         grub_snprintf(value, sizeof(value), "%llu", (ulonglong)(cur->size));
         grub_env_set(args[1], value);        
     }
+
+    g_svd_replace_offset = 0;
 
     VENTOY_CMD_RETURN(GRUB_ERR_NONE);
 }
@@ -2606,67 +2718,6 @@ static grub_err_t ventoy_cmd_dump_img_sector(grub_extcmd_context_t ctxt, int arg
 
     VENTOY_CMD_RETURN(GRUB_ERR_NONE);
 }
-
-#ifdef GRUB_MACHINE_EFI
-static grub_err_t ventoy_cmd_relocator_chaindata(grub_extcmd_context_t ctxt, int argc, char **args)
-{
-    (void)ctxt;
-    (void)argc;
-    (void)args;
-    return 0;
-}
-#else
-static grub_err_t ventoy_cmd_relocator_chaindata(grub_extcmd_context_t ctxt, int argc, char **args)
-{
-    int rc = 0;
-    ulong chain_len = 0;
-    char *chain_data = NULL;
-    char *relocator_addr = NULL;
-    grub_relocator_chunk_t ch;
-    struct grub_relocator *relocator = NULL;
-    char envbuf[64] = { 0 };
-
-    (void)ctxt;
-    (void)argc;
-    (void)args;
-    
-    if (argc != 2)
-    {
-        return 1;
-    }
-
-    chain_data = (char *)grub_strtoul(args[0], NULL, 16);
-    chain_len = grub_strtoul(args[1], NULL, 10);
-
-    relocator = grub_relocator_new ();
-    if (!relocator)
-    {
-        debug("grub_relocator_new failed %p %lu\n", chain_data, chain_len);
-        return 1;
-    }
-
-    rc = grub_relocator_alloc_chunk_addr (relocator, &ch,
-					   0x100000, // GRUB_LINUX_BZIMAGE_ADDR,
-					   chain_len);
-    if (rc)
-    {
-        debug("grub_relocator_alloc_chunk_addr failed %d %p %lu\n", rc, chain_data, chain_len);
-        grub_relocator_unload (relocator);
-        return 1;
-    }
-
-    relocator_addr = get_virtual_current_address(ch);
-
-    grub_memcpy(relocator_addr, chain_data, chain_len);
-    
-    grub_relocator_unload (relocator);
-
-    grub_snprintf(envbuf, sizeof(envbuf), "0x%lx", (unsigned long)relocator_addr);
-    grub_env_set("vtoy_chain_relocator_addr", envbuf);
-
-    VENTOY_CMD_RETURN(GRUB_ERR_NONE);
-}
-#endif
 
 static grub_err_t ventoy_cmd_test_block_list(grub_extcmd_context_t ctxt, int argc, char **args)
 {
@@ -3830,14 +3881,14 @@ int ventoy_is_file_exist(const char *fmt, ...)
     char *pos = NULL;
     char buf[256] = {0};
 
-    grub_snprintf(buf, sizeof(buf), "%s", "[ -f ");
-    pos = buf + 5;
+    grub_snprintf(buf, sizeof(buf), "%s", "[ -f \"");
+    pos = buf + 6;
 
     va_start (ap, fmt);
     len = grub_vsnprintf(pos, 255, fmt, ap);
     va_end (ap);
 
-    grub_strncpy(pos + len, " ]", 2);
+    grub_strncpy(pos + len, "\" ]", 3);
 
     debug("script exec %s\n", buf);
 
@@ -3856,14 +3907,14 @@ int ventoy_is_dir_exist(const char *fmt, ...)
     char *pos = NULL;
     char buf[256] = {0};
 
-    grub_snprintf(buf, sizeof(buf), "%s", "[ -d ");
-    pos = buf + 5;
+    grub_snprintf(buf, sizeof(buf), "%s", "[ -d \"");
+    pos = buf + 6;
 
     va_start (ap, fmt);
     len = grub_vsnprintf(pos, 255, fmt, ap);
     va_end (ap);
 
-    grub_strncpy(pos + len, " ]", 2);
+    grub_strncpy(pos + len, "\" ]", 3);
 
     debug("script exec %s\n", buf);
 
@@ -3926,6 +3977,7 @@ static cmd_para ventoy_cmds[] =
     { "vt_raw_chain_data", ventoy_cmd_raw_chain_data, 0, NULL, "", "", NULL },
     { "vt_get_vtoy_type", ventoy_cmd_get_vtoy_type, 0, NULL, "", "", NULL },
 
+    { "vt_skip_svd", ventoy_cmd_skip_svd, 0, NULL, "", "", NULL },
     { "vt_cpio_busybox64", ventoy_cmd_cpio_busybox_64, 0, NULL, "", "", NULL },
     { "vt_load_cpio", ventoy_cmd_load_cpio, 0, NULL, "", "", NULL },
     { "vt_trailer_cpio", ventoy_cmd_trailer_cpio, 0, NULL, "", "", NULL },
@@ -3983,13 +4035,13 @@ static cmd_para ventoy_cmds[] =
     { "vt_wim_chain_data", ventoy_cmd_wim_chain_data, 0, NULL, "", "", NULL },
 
     { "vt_add_replace_file", ventoy_cmd_add_replace_file, 0, NULL, "", "", NULL },
-    { "vt_relocator_chaindata", ventoy_cmd_relocator_chaindata, 0, NULL, "", "", NULL },
     { "vt_test_block_list", ventoy_cmd_test_block_list, 0, NULL, "", "", NULL },
     { "vt_file_exist_nocase", ventoy_cmd_file_exist_nocase, 0, NULL, "", "", NULL },
 
     
     { "vt_load_plugin", ventoy_cmd_load_plugin, 0, NULL, "", "", NULL },
     { "vt_check_plugin_json", ventoy_cmd_plugin_check_json, 0, NULL, "", "", NULL },
+    { "vt_check_password", ventoy_cmd_check_password, 0, NULL, "", "", NULL },
     
     { "vt_1st_line", ventoy_cmd_read_1st_line, 0, NULL, "", "", NULL },
     { "vt_file_strstr", ventoy_cmd_file_strstr, 0, NULL, "", "", NULL },
@@ -4020,6 +4072,8 @@ GRUB_MOD_INIT(ventoy)
 
     ventoy_env_init();
 
+    ventoy_arch_mode_init();
+    
     for (i = 0; i < ARRAY_SIZE(ventoy_cmds); i++)
     {
         cur = ventoy_cmds + i;
