@@ -121,17 +121,11 @@ if [ "$MODE" = "list" ]; then
             echo "Disk Partition Style  : MBR"
         fi
         
-        vtPART2=$(get_disk_part_name $DISK 2)        
-        rm -rf ./tmpmntp2 && mkdir ./tmpmntp2
-        mount $vtPART2 ./tmpmntp2 > /dev/null 2>&1
-
-        if [ -e ./tmpmntp2/EFI/BOOT/MokManager.efi ]; then
+        if check_disk_secure_boot $DISK; then
             echo "Secure Boot Support   : YES"
         else
             echo "Secure Boot Support   : NO"
         fi        
-        umount ./tmpmntp2 > /dev/null 2>&1
-        rm -rf ./tmpmntp2
     else
         echo "Ventoy Version: NA"
     fi
@@ -331,8 +325,8 @@ if [ "$MODE" = "install" ]; then
         mkdir ./tmp_mnt
         
         vtdebug "mounting part2 ...."
-        for tt in 1 2 3; do
-            if mount ${PART2} ./tmp_mnt; then
+        for tt in 1 2 3 4 5; do            
+            if mount ${PART2} ./tmp_mnt > /dev/null 2>&1; then
                 vtdebug "mounting part2 success"
                 break
             fi
@@ -340,7 +334,7 @@ if [ "$MODE" = "install" ]; then
             mtpnt=$(grep "^${PART2}" /proc/mounts | awk '{print $2}')
             if [ -n "$mtpnt" ]; then
                 umount $mtpnt >/dev/null 2>&1
-            fi
+            fi    
             sleep 2
         done
         
@@ -451,13 +445,15 @@ else
     if [ "$SECUREBOOT" != "YES" ]; then
         mkdir ./tmp_mnt
         
-        vtdebug "mounting part2 ...."
-        for tt in 1 2 3; do
-            if mount ${PART2} ./tmp_mnt; then
+        vtdebug "mounting part2 ...."        
+        for tt in 1 2 3 4 5; do            
+            if mount ${PART2} ./tmp_mnt > /dev/null 2>&1; then
                 vtdebug "mounting part2 success"
                 break
+            else
+                vtdebug "mounting part2 failed, now wait and retry..."
             fi
-            sleep 2
+            sleep 2            
         done
         
         rm -f ./tmp_mnt/EFI/BOOT/BOOTX64.EFI
@@ -472,7 +468,7 @@ else
         
         
         for tt in 1 2 3; do
-            if umount ./tmp_mnt; then
+            if umount ./tmp_mnt > /dev/null 2>&1; then
                 vtdebug "umount part2 success"
                 rm -rf ./tmp_mnt
                 break
